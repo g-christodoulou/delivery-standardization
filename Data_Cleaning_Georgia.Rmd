@@ -1,0 +1,145 @@
+---
+title: "Data Cleaning"
+author: "Georgia Christodoulou"
+date: "2025-02-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Libraries and Data Import
+```{r}
+library(tidyverse)
+library(dbplyr)
+library(data.table)
+library(janitor)
+library(stringr)
+library(lubridate)
+
+transactions <- as.data.frame(fread("data/transactional_data.csv"))
+customer_address <- as.data.frame(fread("data/customer_address_and_zip_mapping.csv"))
+customer_profile <- as.data.frame(fread("data/customer_profile.csv"))
+delivery_cost <- readxl::read_xlsx('data/delivery_cost_data.xlsx')
+```
+
+# Cost Data Preparation
+```{r}
+# separate volume range into mix and max
+delivery_cost <- delivery_cost %>%
+  separate("Vol Range", into = c("min_vol", "max_vol"), sep = "-", convert = TRUE) %>%
+  mutate(
+    max_vol = ifelse(str_detect(min_vol, "\\+"), Inf, as.numeric(max_vol)),
+    min_vol = as.numeric(str_replace(min_vol, "\\+", ""))
+  )
+```
+
+# Customer Address Preparation
+```{r}
+customer_address <- customer_address %>%
+  separate(full_address, into = c("zip", "city", "state", "state_abbr", "county", "region", "lat", "lon"), sep = ",", convert = TRUE)
+```
+
+
+# Join Data
+```{r}
+# join transactions an customer profile
+joined_data <- left_join(transactions, customer_profile, by = "CUSTOMER_NUMBER")
+
+# get annual volume by customer
+annual_customer_vol <- joined_data %>%
+  group_by(CUSTOMER_NUMBER, YEAR, COLD_DRINK_CHANNEL) %>%
+  summarize(annual_gallons = sum(ORDERED_GALLONS),
+            annual_cases = sum(ORDERED_CASES))
+
+# assign median cost to customer
+# cases
+annual_customer_case_cost <- 
+  left_join(annual_customer_vol, delivery_cost, by = c("COLD_DRINK_CHANNEL" = "Cold Drink Channel")) %>%
+  filter(annual_cases >= min_vol & annual_cases <= max_vol, 
+    `Applicable To` == "Bottles and Cans",
+    `Cost Type` == "Per Case") %>%
+  select(CUSTOMER_NUMBER, YEAR, COLD_DRINK_CHANNEL, annual_cases, median_delivery_cost_cases = `Median Delivery Cost`)
+
+# gallons
+annual_customer_gallon_cost <- 
+  left_join(annual_customer_vol, delivery_cost, by = c("COLD_DRINK_CHANNEL" = "Cold Drink Channel")) %>%
+  filter(annual_gallons >= min_vol & annual_gallons <= max_vol,  
+    `Applicable To` == "Fountain",
+    `Cost Type` == "Per Gallon") %>%
+  select(CUSTOMER_NUMBER, YEAR, COLD_DRINK_CHANNEL, annual_gallons, median_delivery_cost_gallons = `Median Delivery Cost`)
+
+# join customer vol to costs tables
+annual_customer_costs <-
+  left_join(annual_customer_vol, annual_customer_case_cost, by = c("CUSTOMER_NUMBER", "YEAR", "COLD_DRINK_CHANNEL", "annual_cases"))
+annual_customer_costs <-
+  left_join(annual_customer_costs, annual_customer_gallon_cost, by = c("CUSTOMER_NUMBER", "YEAR", "COLD_DRINK_CHANNEL", "annual_gallons"))
+
+# join median delivery costs to transaction data
+joined_data_with_cost <- 
+  left_join(joined_data, annual_customer_costs, by = c("CUSTOMER_NUMBER", "YEAR", "COLD_DRINK_CHANNEL"))
+
+joined_data <- left_join(joined_data, customer_address, by = c("ZIP_CODE" = "zip"))
+
+joined_data_with_cost <- left_join(joined_data_with_cost, customer_address, by = c("ZIP_CODE" = "zip"))
+```
+
+# Variable Cleaning
+```{r}
+# date types
+joined_data_with_cost <- joined_data_with_cost %>%
+  mutate(
+    FIRST_DELIVERY_DATE = ymd(mdy(FIRST_DELIVERY_DATE)), 
+    ON_BOARDING_DATE = ymd(mdy(ON_BOARDING_DATE)),
+    TRANSACTION_DATE = ymd(mdy(TRANSACTION_DATE)))
+
+# IDs as strings
+joined_data_with_cost <- joined_data_with_cost %>%
+  mutate(
+    PRIMARY_GROUP_NUMBER = as.character(PRIMARY_GROUP_NUMBER),
+    ZIP_CODE = as.character(ZIP_CODE),
+    CUSTOMER_NUMBER = as.character(CUSTOMER_NUMBER)
+  )
+
+# factors
+joined_data_with_cost <- joined_data_with_cost %>%
+  mutate(
+    COLD_DRINK_CHANNEL = as.factor(COLD_DRINK_CHANNEL),
+    FREQUENT_ORDER_TYPE = as.factor(FREQUENT_ORDER_TYPE),
+    TRADE_CHANNEL = as.factor(TRADE_CHANNEL),
+    SUB_TRADE_CHANNEL = as.factor(SUB_TRADE_CHANNEL),
+    ORDER_TYPE = as.factor(ORDER_TYPE)
+  )
+
+# variable name standardization
+joined_data_with_cost <- joined_data_with_cost %>% clean_names()
+
+joined_data_with_cost %>% str()
+```
+
+# New Columns
+```{r}
+neg_deliveries <- joined_data_with_cost %>%
+  filter(delivered_cases < 0 | delivered_gallons < 0) %>%
+  group_by(customer_number, year) %>%
+  summarize(neg_deliveries = n())
+
+customers_by_group <- joined_data_with_cost %>%
+  group_by(primary_group_number, year) %>%
+  summarize(num_customers = n())
+
+joined_data_with_cost <-
+  left_join(joined_data_with_cost, neg_deliveries, by = c("customer_number", "year"))
+
+joined_data_with_cost <-
+  left_join(joined_data_with_cost, customers_by_group, by = c("primary_group_number", "year"))
+
+# replace NAs with 0
+joined_data_with_cost <- joined_data_with_cost %>%
+  mutate(across(c(median_delivery_cost_cases, median_delivery_cost_gallons, neg_deliveries), ~ replace_na(., 0)))
+
+joined_data_with_cost %>% str()
+joined_data_with_cost %>% summary()
+```
+
