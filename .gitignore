@@ -1,0 +1,8 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+customer_address_and_zip_mapping.csv
+customer_profile.csv
+delivery_cost_data.xlsx
+transactional_data.csv

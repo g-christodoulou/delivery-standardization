@@ -1,0 +1,109 @@
+---
+title: "Swire_EDA_Georgia"
+author: "Georgia Christodoulou"
+date: "2025-02-04"
+output: html_document
+---
+
+```{r}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+```
+
+- look at CO2
+- look at local vs non local
+
+# Libraries and Data Import
+```{r}
+library(tidyverse)
+library(dbplyr)
+library(data.table)
+
+transactions <- as.data.frame(fread("data/transactional_data.csv"))
+customer_address <- as.data.frame(fread("data/customer_address_and_zip_mapping.csv"))
+customer_profile <- as.data.frame(fread("data/customer_profile.csv"))
+```
+
+# Data Structures and Summaries
+```{r}
+str(transactions)
+str(customer_address)
+str(customer_profile)
+
+summary(transactions)
+summary(customer_address)
+summary(customer_profile)
+```
+
+# Cleaning and Joining Data
+```{r}
+joined_data <- left_join(transactions, customer_profile, by = "CUSTOMER_NUMBER")
+
+customer_address <- customer_address %>%
+  rename(ZIP_CODE = zip)
+
+joined_data <- left_join(joined_data, customer_address, by = "ZIP_CODE")
+
+joined_data <- joined_data %>% mutate(across(where(is.character),as.factor))
+
+str(joined_data)
+```
+
+# Numeric Variables
+```{r}
+joined_data %>%
+  group_by(CUSTOMER_NUMBER, YEAR, FIRST_DELIVERY_DATE, TRANSACTION_DATE) %>%
+  summarize(GALLONS = sum(ORDERED_GALLONS + ORDERED_CASES)) %>%
+  arrange(desc(CUSTOMER_NUMBER))
+```
+
+```{r}
+joined_data %>%
+  group_by(CUSTOMER_NUMBER, YEAR, FIRST_DELIVERY_DATE, TRADE_CHANNEL, SUB_TRADE_CHANNEL) %>%
+  summarize(GALLONS = sum(ORDERED_GALLONS + ORDERED_CASES)) %>%
+  pivot_wider(names_from = YEAR, values_from = GALLONS) %>%
+  mutate(YoY_Growth = ((`2024` - `2023`) / `2023`) * 100, Unit_Delta = (`2024` - `2023`)) %>%
+  arrange(desc(Unit_Delta))
+```
+
+# Character Variable Plots
+## ORDER TYPE
+```{r}
+joined_data %>%
+  group_by(ORDER_TYPE, YEAR) %>%
+  summarize(GALLONS = sum(ORDERED_GALLONS + ORDERED_CASES))
+
+joined_data %>%
+  group_by(ORDER_TYPE, YEAR) %>%
+  summarize(customer_count = n_distinct(CUSTOMER_NUMBER))
+
+joined_data %>%
+  group_by(ORDER_TYPE) %>%
+  summarize(GALLONS = sum(ORDERED_GALLONS + ORDERED_CASES)) %>%
+  ggplot(aes(x = ORDER_TYPE, y = GALLONS, fill = ORDER_TYPE)) +
+  geom_bar(stat="identity") +
+  ggtitle("Barplot of Ordered Gallons by Order Type") +
+  labs(x = "Order Type", y = "Total Gallons") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal()
+```
+
+```{r}
+joined_data %>%
+  group_by(COLD_DRINK_CHANNEL, YEAR) %>%
+  summarize(GALLONS = sum(ORDERED_GALLONS + ORDERED_CASES))
+
+joined_data %>%
+  group_by(COLD_DRINK_CHANNEL, YEAR) %>%
+  summarize(customer_count = n_distinct(CUSTOMER_NUMBER))
+
+joined_data %>%
+  group_by(COLD_DRINK_CHANNEL) %>%
+  summarize(GALLONS = sum(ORDERED_GALLONS + ORDERED_CASES)) %>%
+  ggplot(aes(x = COLD_DRINK_CHANNEL, y = GALLONS, fill = COLD_DRINK_CHANNEL)) +
+  geom_bar(stat="identity") +
+  ggtitle("Barplot of Ordered Gallons by Drink Channel") +
+  labs(x = "Drink Channel", y = "Total Gallons") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal()
+```
+
