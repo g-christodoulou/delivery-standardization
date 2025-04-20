@@ -9,100 +9,702 @@ output: html_document
 knitr::opts_chunk$set(warning = FALSE, message = FALSE)
 ```
 
-- look at CO2
-- look at local vs non local
+# Business Problem
+Regional beverage bottler Swire Coca-Cola (SCCU) relies on two distribution models: 1) “Red Truck”, which features high-volume customers serviced personally by Swire, and 2) “White Truck” or “Alternate Route to Market”, which entails smaller customers serviced by a third-party distributor.  
+
+Swire’s current segmenting strategy has led to misallocation of resources, inflated expenses, and missed opportunities from clients with high-growth potential. Swire aims to better algin their customers with the business proposition of these models by identifying customer characteristics and ordering behavior that better determines the right business model for the long-term relationship.
+
+# Questions
+What are the most common order types, cold drink channels, trade channels, etc.?
+Is there an obvious trend between increasing customer count and ordered gallons in a primary customer group?
+Are there any trade channels that could suggest high growth potential but aren't as obvious?
 
 # Libraries and Data Import
 ```{r}
 library(tidyverse)
 library(dbplyr)
 library(data.table)
+library(janitor)
+library(psych)
 
 transactions <- as.data.frame(fread("data/transactional_data.csv"))
 customer_address <- as.data.frame(fread("data/customer_address_and_zip_mapping.csv"))
 customer_profile <- as.data.frame(fread("data/customer_profile.csv"))
+delivery_cost <- readxl::read_xlsx('data/delivery_cost_data.xlsx')
 ```
 
-# Data Structures and Summaries
+# Cost Data Preparation
 ```{r}
-str(transactions)
-str(customer_address)
-str(customer_profile)
-
-summary(transactions)
-summary(customer_address)
-summary(customer_profile)
+# separate volume range into mix and max
+delivery_cost <- delivery_cost %>%
+  separate("Vol Range", into = c("min_vol", "max_vol"), sep = "-", convert = TRUE) %>%
+  mutate(
+    max_vol = ifelse(str_detect(min_vol, "\\+"), Inf, as.numeric(max_vol)),
+    min_vol = as.numeric(str_replace(min_vol, "\\+", ""))
+  )
 ```
 
-# Cleaning and Joining Data
+# Customer Address Preparation
 ```{r}
+# separate full customer address
+customer_address <- customer_address %>%
+  separate(full_address, into = c("zip", "city", "state", "state_abbr", "county", "region", "lat", "lon"), sep = ",", convert = TRUE)
+```
+
+
+# Join Data
+```{r}
+# join transactions an customer profile
 joined_data <- left_join(transactions, customer_profile, by = "CUSTOMER_NUMBER")
 
-customer_address <- customer_address %>%
-  rename(ZIP_CODE = zip)
+# get annual volume by customer
+annual_customer_vol <- joined_data %>%
+  group_by(CUSTOMER_NUMBER, YEAR, COLD_DRINK_CHANNEL) %>%
+  summarize(annual_gallons = sum(ORDERED_GALLONS),
+            annual_cases = sum(ORDERED_CASES))
 
-joined_data <- left_join(joined_data, customer_address, by = "ZIP_CODE")
+# assign median cost to customer
+# cases
+annual_customer_case_cost <- 
+  left_join(annual_customer_vol, delivery_cost, by = c("COLD_DRINK_CHANNEL" = "Cold Drink Channel")) %>%
+  filter(annual_cases >= min_vol & annual_cases <= max_vol, 
+    `Applicable To` == "Bottles and Cans",
+    `Cost Type` == "Per Case") %>%
+  select(CUSTOMER_NUMBER, YEAR, COLD_DRINK_CHANNEL, annual_cases, median_delivery_cost_cases = `Median Delivery Cost`)
 
-joined_data <- joined_data %>% mutate(across(where(is.character),as.factor))
+# gallons
+annual_customer_gallon_cost <- 
+  left_join(annual_customer_vol, delivery_cost, by = c("COLD_DRINK_CHANNEL" = "Cold Drink Channel")) %>%
+  filter(annual_gallons >= min_vol & annual_gallons <= max_vol,  
+    `Applicable To` == "Fountain",
+    `Cost Type` == "Per Gallon") %>%
+  select(CUSTOMER_NUMBER, YEAR, COLD_DRINK_CHANNEL, annual_gallons, median_delivery_cost_gallons = `Median Delivery Cost`)
 
-str(joined_data)
+# join customer vol to costs tables
+annual_customer_costs <-
+  left_join(annual_customer_vol, annual_customer_case_cost, by = c("CUSTOMER_NUMBER", "YEAR", "COLD_DRINK_CHANNEL", "annual_cases"))
+annual_customer_costs <-
+  left_join(annual_customer_costs, annual_customer_gallon_cost, by = c("CUSTOMER_NUMBER", "YEAR", "COLD_DRINK_CHANNEL", "annual_gallons"))
+
+# join median delivery costs to transaction data
+joined_data_with_cost <- 
+  left_join(joined_data, annual_customer_costs, by = c("CUSTOMER_NUMBER", "YEAR", "COLD_DRINK_CHANNEL"))
+
+joined_data <- left_join(joined_data, customer_address, by = c("ZIP_CODE" = "zip"))
+
+# join transactions, customer profiles, and delivery cost with customer address
+joined_data_with_cost <- left_join(joined_data_with_cost, customer_address, by = c("ZIP_CODE" = "zip"))
 ```
 
-# Numeric Variables
+# Variable Cleaning
 ```{r}
-joined_data %>%
-  group_by(CUSTOMER_NUMBER, YEAR, FIRST_DELIVERY_DATE, TRANSACTION_DATE) %>%
-  summarize(GALLONS = sum(ORDERED_GALLONS + ORDERED_CASES)) %>%
-  arrange(desc(CUSTOMER_NUMBER))
+# date types
+joined_data_with_cost <- joined_data_with_cost %>%
+  mutate(
+    FIRST_DELIVERY_DATE = ymd(mdy(FIRST_DELIVERY_DATE)), 
+    ON_BOARDING_DATE = ymd(mdy(ON_BOARDING_DATE)),
+    TRANSACTION_DATE = ymd(mdy(TRANSACTION_DATE)))
+
+# IDs as strings
+joined_data_with_cost <- joined_data_with_cost %>%
+  mutate(
+    PRIMARY_GROUP_NUMBER = as.character(PRIMARY_GROUP_NUMBER),
+    ZIP_CODE = as.character(ZIP_CODE),
+    CUSTOMER_NUMBER = as.character(CUSTOMER_NUMBER)
+  )
+
+# factors
+joined_data_with_cost <- joined_data_with_cost %>%
+  mutate(
+    COLD_DRINK_CHANNEL = as.factor(COLD_DRINK_CHANNEL),
+    FREQUENT_ORDER_TYPE = as.factor(FREQUENT_ORDER_TYPE),
+    TRADE_CHANNEL = as.factor(TRADE_CHANNEL),
+    SUB_TRADE_CHANNEL = as.factor(SUB_TRADE_CHANNEL),
+    ORDER_TYPE = as.factor(ORDER_TYPE)
+  )
+
+# variable name standardization
+joined_data_with_cost <- joined_data_with_cost %>% clean_names()
+
+joined_data_with_cost %>% str()
 ```
 
+# New Columns
 ```{r}
-joined_data %>%
-  group_by(CUSTOMER_NUMBER, YEAR, FIRST_DELIVERY_DATE, TRADE_CHANNEL, SUB_TRADE_CHANNEL) %>%
-  summarize(GALLONS = sum(ORDERED_GALLONS + ORDERED_CASES)) %>%
-  pivot_wider(names_from = YEAR, values_from = GALLONS) %>%
-  mutate(YoY_Growth = ((`2024` - `2023`) / `2023`) * 100, Unit_Delta = (`2024` - `2023`)) %>%
+# number of annual returns
+neg_deliveries <- joined_data_with_cost %>%
+  filter(delivered_cases < 0 | delivered_gallons < 0) %>%
+  group_by(customer_number, year) %>%
+  summarize(neg_deliveries = n())
+
+# number of customers per primary customer group
+customers_by_group <- joined_data_with_cost %>%
+  group_by(primary_group_number, year) %>%
+  summarize(num_customers = n())
+
+# join returns with rest of data
+joined_data_with_cost <-
+  left_join(joined_data_with_cost, neg_deliveries, by = c("customer_number", "year"))
+
+# join number of customers with the rest of the data
+joined_data_with_cost <-
+  left_join(joined_data_with_cost, customers_by_group, by = c("primary_group_number", "year"))
+
+# replace NAs with 0
+joined_data_with_cost <- joined_data_with_cost %>%
+  mutate(across(c(median_delivery_cost_cases, median_delivery_cost_gallons, neg_deliveries), ~ replace_na(., 0)))
+
+joined_data_with_cost %>% str()
+joined_data_with_cost %>% summary()
+```
+
+# All Customers
+## Gallons by Customer
+```{r}
+# total gallons ordered by customer by year
+joined_data_with_cost %>%
+  group_by(customer_number, year) %>%
+  summarize(gallons = sum(ordered_gallons + ordered_cases)) %>%
+  arrange(desc(customer_number))
+
+# transaction frequency by customer
+joined_data_with_cost %>%
+  group_by(customer_number, year) %>%
+  summarize(gallons = round(sum(ordered_gallons + ordered_cases),2), transactions = n_distinct(transaction_date), 
+            gal_per_transaction = round((sum(ordered_gallons + ordered_cases))/ n_distinct(transaction_date),2)) %>%
+  pivot_wider(names_from = year, values_from = c(gallons, transactions, gal_per_transaction), names_sep = "_") %>%
+  arrange(desc(gal_per_transaction_2024))
+```
+
+## Customer YoY Changes
+```{r}
+# year over year changes in gallon volume by customer
+joined_data_with_cost %>%
+  group_by(customer_number, year, first_delivery_date, trade_channel, sub_trade_channel) %>%
+  summarize(gallons = sum(ordered_gallons + ordered_cases)) %>%
+  pivot_wider(names_from = year, values_from = gallons) %>%
+  mutate(Unit_Delta = (`2024` - `2023`)) %>%
   arrange(desc(Unit_Delta))
 ```
 
-# Character Variable Plots
-## ORDER TYPE
+## Primary Customer Group
 ```{r}
-joined_data %>%
-  group_by(ORDER_TYPE, YEAR) %>%
-  summarize(GALLONS = sum(ORDERED_GALLONS + ORDERED_CASES))
+# year over year changes in gallon volume by primary customer group
+primary_group_gallon_comp <- joined_data_with_cost %>%
+  filter(!is.na(primary_group_number)) %>%  
+  group_by(primary_group_number, year) %>%
+  summarize(
+    gallons = round(sum(ordered_gallons + ordered_cases, na.rm = TRUE),2),
+    cust_cnt = n_distinct(customer_number),
+    .groups = "drop"
+  ) %>%
+  pivot_wider(names_from = year, values_from = c(gallons, cust_cnt), names_sep = "_") %>%
+  mutate(
+    gallon_delta = round(gallons_2024 - gallons_2023, 2),
+    cust_delta = cust_cnt_2024 - cust_cnt_2023
+  ) %>%
+  arrange(desc(gallon_delta))
 
-joined_data %>%
-  group_by(ORDER_TYPE, YEAR) %>%
-  summarize(customer_count = n_distinct(CUSTOMER_NUMBER))
+primary_group_gallon_comp
+```
 
-joined_data %>%
-  group_by(ORDER_TYPE) %>%
-  summarize(GALLONS = sum(ORDERED_GALLONS + ORDERED_CASES)) %>%
-  ggplot(aes(x = ORDER_TYPE, y = GALLONS, fill = ORDER_TYPE)) +
+## Order Type
+```{r}
+# gallons by order type and year for all customers
+joined_data_with_cost %>%
+  group_by(order_type, year) %>%
+  summarize(gallons = sum(ordered_gallons + ordered_cases))
+
+# number of customers by order type and year for all customers
+joined_data_with_cost %>%
+  group_by(order_type, year) %>%
+  summarize(customer_count = n_distinct(customer_number))
+
+# for all customers
+joined_data_with_cost %>%
+  group_by(order_type) %>%
+  summarize(gallons = sum(ordered_gallons + ordered_cases)) %>%
+  ggplot(aes(x = order_type, y = gallons, fill = order_type)) +
   geom_bar(stat="identity") +
   ggtitle("Barplot of Ordered Gallons by Order Type") +
   labs(x = "Order Type", y = "Total Gallons") +
   scale_y_continuous(labels = scales::comma) +
   theme_minimal()
+
+# for customers with < 400 gallons per year
+joined_data_with_cost %>%
+  group_by(customer_number, order_type) %>%
+  summarize(total_gallons = sum(ordered_gallons + ordered_cases, na.rm = TRUE)) %>%
+  filter(total_gallons < 400) %>% 
+  group_by(order_type) %>% 
+  summarize(gallons = sum(total_gallons)) %>%
+  ggplot(aes(x = order_type, y = gallons, fill = order_type)) +
+  geom_bar(stat = "identity") +
+  ggtitle("Barplot of Ordered Gallons by Order Type (Customers < 400 Gallons)") +
+  labs(x = "Order Type", y = "Total Gallons") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal()
+
+# for customers with > 400 gallons per year
+joined_data_with_cost %>%
+  group_by(customer_number, order_type) %>%
+  summarize(total_gallons = sum(ordered_gallons + ordered_cases, na.rm = TRUE)) %>%
+  filter(total_gallons > 400) %>% 
+  group_by(order_type) %>% 
+  summarize(gallons = sum(total_gallons)) %>%
+  ggplot(aes(x = order_type, y = gallons, fill = order_type)) +
+  geom_bar(stat = "identity") +
+  ggtitle("Barplot of Ordered Gallons by Order Type (Customers > 400 Gallons)") +
+  labs(x = "Order Type", y = "Total Gallons") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal()
 ```
 
+The most popular order type among customers with less than 400 gallon volume is the call center and mycoke legacy/mycoke360 for more than 400 gallons.
+
+## Frequent Order Type
 ```{r}
-joined_data %>%
-  group_by(COLD_DRINK_CHANNEL, YEAR) %>%
-  summarize(GALLONS = sum(ORDERED_GALLONS + ORDERED_CASES))
+# gallons by frequent order type and year for all customers
+joined_data_with_cost %>%
+  group_by(frequent_order_type, year) %>%
+  summarize(gallons = sum(ordered_gallons + ordered_cases))
 
-joined_data %>%
-  group_by(COLD_DRINK_CHANNEL, YEAR) %>%
-  summarize(customer_count = n_distinct(CUSTOMER_NUMBER))
+# number of customers by frequent order type and year for all customers
+joined_data_with_cost %>%
+  group_by(frequent_order_type, year) %>%
+  summarize(customer_count = n_distinct(customer_number))
 
-joined_data %>%
-  group_by(COLD_DRINK_CHANNEL) %>%
-  summarize(GALLONS = sum(ORDERED_GALLONS + ORDERED_CASES)) %>%
-  ggplot(aes(x = COLD_DRINK_CHANNEL, y = GALLONS, fill = COLD_DRINK_CHANNEL)) +
+# for all customers
+joined_data_with_cost %>%
+  group_by(frequent_order_type) %>%
+  summarize(gallons = sum(ordered_gallons + ordered_cases)) %>%
+  ggplot(aes(x = frequent_order_type, y = gallons, fill = frequent_order_type)) +
   geom_bar(stat="identity") +
-  ggtitle("Barplot of Ordered Gallons by Drink Channel") +
-  labs(x = "Drink Channel", y = "Total Gallons") +
+  ggtitle("Barplot of Ordered Gallons by Frequent Order Type") +
+  labs(x = "Frequent Order Type", y = "Total Gallons") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal()
+
+# for customers with < 400 gallons per year
+joined_data_with_cost %>%
+  group_by(customer_number, frequent_order_type) %>%
+  summarize(total_gallons = sum(ordered_gallons + ordered_cases, na.rm = TRUE)) %>%
+  filter(total_gallons < 400) %>% 
+  group_by(frequent_order_type) %>% 
+  summarize(gallons = sum(total_gallons)) %>%
+  ggplot(aes(x = frequent_order_type, y = gallons, fill = frequent_order_type)) +
+  geom_bar(stat = "identity") +
+  ggtitle("Ordered Gallons by Frequent Order Type (Customers < 400 Gallons)") +
+  labs(x = "Frequent Order Type", y = "Total Gallons") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal()
+
+# for customers with > 400 gallons per year
+joined_data_with_cost %>%
+  group_by(customer_number, frequent_order_type) %>%
+  summarize(total_gallons = sum(ordered_gallons + ordered_cases, na.rm = TRUE)) %>%
+  filter(total_gallons > 400) %>% 
+  group_by(frequent_order_type) %>% 
+  summarize(gallons = sum(total_gallons)) %>%
+  ggplot(aes(x = frequent_order_type, y = gallons, fill = frequent_order_type)) +
+  geom_bar(stat = "identity") +
+  ggtitle("Ordered Gallons by Frequent Order Type (Customers > 400 Gallons)") +
+  labs(x = "Frequent Order Type", y = "Total Gallons") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal()
+```
+
+The most popular frequent order type for all customers is through a sales rep, however, customers with volume less than 400 gallons also use the call center and mycoke360/legacy more frequently that those with volume more than 400 gallons. 
+
+## Cold Drink Channel
+```{r}
+# gallons by cold drink channel and year for all customers
+joined_data_with_cost %>%
+  group_by(cold_drink_channel, year) %>%
+  summarize(gallons = sum(ordered_gallons + ordered_cases))
+
+# customer count by cold drink channel and year for all customers
+joined_data_with_cost %>%
+  group_by(cold_drink_channel, year) %>%
+  summarize(customer_count = n_distinct(customer_number))
+
+# for all customers
+joined_data_with_cost %>%
+  group_by(cold_drink_channel) %>%
+  summarize(gallons = sum(ordered_gallons + ordered_cases)) %>%
+  ggplot(aes(x = cold_drink_channel, y = gallons, fill = cold_drink_channel)) +
+  geom_bar(stat="identity") +
+  ggtitle("Barplot of Ordered Gallons by Cold Drink Channel") +
+  labs(x = "Cold Drink Channel", y = "Total Gallons") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal()
+
+# for customers with < 400 gallons per year
+joined_data_with_cost %>%
+  group_by(customer_number, cold_drink_channel) %>%
+  summarize(total_gallons = sum(ordered_gallons + ordered_cases, na.rm = TRUE)) %>%
+  filter(total_gallons < 400) %>% 
+  group_by(cold_drink_channel) %>% 
+  summarize(gallons = sum(total_gallons)) %>%
+  ggplot(aes(x = cold_drink_channel, y = gallons, fill = cold_drink_channel)) +
+  geom_bar(stat = "identity") +
+  ggtitle("Ordered Gallons by Cold Drink Channel (Customers < 400 Gallons)") +
+  labs(x = "Cold Drink Channel", y = "Total Gallons") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal()
+
+# for customers with > 400 gallons per year
+joined_data_with_cost %>%
+  group_by(customer_number, cold_drink_channel) %>%
+  summarize(total_gallons = sum(ordered_gallons + ordered_cases, na.rm = TRUE)) %>%
+  filter(total_gallons > 400) %>% 
+  group_by(cold_drink_channel) %>% 
+  summarize(gallons = sum(total_gallons)) %>%
+  ggplot(aes(x = cold_drink_channel, y = gallons, fill = cold_drink_channel)) +
+  geom_bar(stat = "identity") +
+  ggtitle("Ordered Gallons by Cold Drink Channel (Customers > 400 Gallons)") +
+  labs(x = "Cold Drink Channel", y = "Total Gallons") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal()
+```
+
+Dining and goods are the main cold drink channels for customers with a volume of less than 400 gallons, while bulk trade and dining dominate for those with more than 400 gallons. This could suggest the need for a separate 'dining' cold drink channel analysis to compare characteristics between the two thresholds.
+
+## Trade Channel
+```{r}
+# gallons by trade channel and year for all customers
+joined_data_with_cost %>%
+  group_by(trade_channel, year) %>%
+  summarize(gallons = sum(ordered_gallons + ordered_cases))
+
+# customers by trade channel and year for all customers
+joined_data_with_cost %>%
+  group_by(trade_channel, year) %>%
+  summarize(customer_count = n_distinct(customer_number))
+
+# for all customers
+joined_data_with_cost %>%
+  group_by(trade_channel) %>%
+  summarize(gallons = sum(ordered_gallons + ordered_cases)) %>%
+  ggplot(aes(x = trade_channel, y = gallons, fill = trade_channel)) +
+  geom_bar(stat="identity") +
+  ggtitle("Barplot of Ordered Gallons by Order Type") +
+  labs(x = "Order Type", y = "Total Gallons") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal()
+
+# for customers with < 400 gallons per year
+joined_data_with_cost %>%
+  group_by(customer_number, trade_channel) %>%
+  summarize(total_gallons = sum(ordered_gallons + ordered_cases, na.rm = TRUE)) %>%
+  filter(total_gallons < 400) %>% 
+  group_by(trade_channel) %>% 
+  summarize(gallons = sum(total_gallons)) %>%
+  ggplot(aes(x = trade_channel, y = gallons, fill = trade_channel)) +
+  geom_bar(stat = "identity") +
+  ggtitle("Ordered Gallons by Trade Channel (Customers < 400 Gallons)") +
+  labs(x = "Trade Channel", y = "Total Gallons") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal()
+
+# for customers with > 400 gallons per year
+joined_data_with_cost %>%
+  group_by(customer_number, trade_channel) %>%
+  summarize(total_gallons = sum(ordered_gallons + ordered_cases, na.rm = TRUE)) %>%
+  filter(total_gallons > 400) %>% 
+  group_by(trade_channel) %>% 
+  summarize(gallons = sum(total_gallons)) %>%
+  ggplot(aes(x = trade_channel, y = gallons, fill = trade_channel)) +
+  geom_bar(stat = "identity") +
+  ggtitle("Ordered Gallons by Trade Channel (Customers > 400 Gallons)") +
+  labs(x = "Trade Channel", y = "Total Gallons") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal()
+```
+
+# Local Market Partners
+## Gallons by Customer
+```{r}
+# total gallons ordered
+joined_data_with_cost %>%
+  filter(local_market_partner == TRUE & co2_customer == FALSE) %>%
+  group_by(customer_number, year) %>%
+  summarize(gallons = sum(ordered_gallons + ordered_cases)) %>%
+  arrange(desc(customer_number))
+
+# transaction frequency
+joined_data_with_cost %>%
+  filter(local_market_partner == TRUE & co2_customer == FALSE) %>%
+  group_by(customer_number, year) %>%
+  summarize(gallons = round(sum(ordered_gallons + ordered_cases),2), transactions = n_distinct(transaction_date), 
+            gal_per_transaction = round((sum(ordered_gallons + ordered_cases))/ n_distinct(transaction_date),2)) %>%
+  pivot_wider(names_from = year, values_from = c(gallons, transactions, gal_per_transaction), names_sep = "_") %>%
+  arrange(desc(gal_per_transaction_2024))
+```
+
+## Customer YoY Changes
+```{r}
+# year over year changes in gallon volume by customer
+joined_data_with_cost %>%
+  filter(local_market_partner == TRUE & co2_customer == FALSE) %>%
+  group_by(customer_number, year, first_delivery_date, trade_channel, sub_trade_channel) %>%
+  summarize(gallons = sum(ordered_gallons + ordered_cases)) %>%
+  pivot_wider(names_from = year, values_from = gallons) %>%
+  mutate(Unit_Delta = (`2024` - `2023`)) %>%
+  arrange(desc(Unit_Delta))
+```
+
+Cruises, online stores, bulk trade, and comprehensive providers seem to overall have higher unit delta year over year among the sub trade channels. Fast Casual Dining also stands out with relatively good year-over-year changes in orders, suggesting that this group could be a good focus for identifying less obvious high-growth potential customers amongst the local market partners.
+
+## Primary Customer Group
+```{r}
+# year over year changes in gallon volume by primary customer group
+primary_group_local_gallon_comp <- joined_data_with_cost %>%
+  filter(local_market_partner == TRUE & co2_customer == FALSE) %>%
+  filter(!is.na(primary_group_number)) %>%  
+  group_by(primary_group_number, year) %>%
+  summarize(
+    gallons = round(sum(ordered_gallons + ordered_cases, na.rm = TRUE),2),
+    cust_cnt = n_distinct(customer_number),
+    .groups = "drop"
+  ) %>%
+  pivot_wider(names_from = year, values_from = c(gallons, cust_cnt), names_sep = "_") %>%
+  mutate(
+    gallon_delta = round(gallons_2024 - gallons_2023, 2),
+    cust_delta = cust_cnt_2024 - cust_cnt_2023
+  ) %>%
+  arrange(desc(gallon_delta))
+
+primary_group_local_gallon_comp
+```
+
+## Order Type
+```{r}
+# gallons by order type and year for all customers
+joined_data_with_cost %>%
+  filter(local_market_partner == TRUE & co2_customer == FALSE) %>%
+  group_by(order_type, year) %>%
+  summarize(gallons = sum(ordered_gallons + ordered_cases))
+
+# customers by order type and year for all customers
+joined_data_with_cost %>%
+  filter(local_market_partner == TRUE & co2_customer == FALSE) %>%
+  group_by(order_type, year) %>%
+  summarize(customer_count = n_distinct(customer_number))
+
+# for all customers
+joined_data_with_cost %>%
+  filter(local_market_partner == TRUE & co2_customer == FALSE) %>%
+  group_by(order_type) %>%
+  summarize(gallons = sum(ordered_gallons + ordered_cases)) %>%
+  ggplot(aes(x = order_type, y = gallons, fill = order_type)) +
+  geom_bar(stat="identity") +
+  ggtitle("Barplot of Ordered Gallons by Order Type") +
+  labs(x = "Order Type", y = "Total Gallons") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal()
+
+# for customers with < 400 gallons per year
+joined_data_with_cost %>%
+  filter(local_market_partner == TRUE & co2_customer == FALSE) %>%
+  group_by(customer_number, order_type) %>%
+  summarize(total_gallons = sum(ordered_gallons + ordered_cases, na.rm = TRUE)) %>%
+  filter(total_gallons < 400) %>% 
+  group_by(order_type) %>% 
+  summarize(gallons = sum(total_gallons)) %>%
+  ggplot(aes(x = order_type, y = gallons, fill = order_type)) +
+  geom_bar(stat = "identity") +
+  ggtitle("Barplot of Ordered Gallons by Order Type (Customers < 400 Gallons)") +
+  labs(x = "Order Type", y = "Total Gallons") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal()
+
+# for customers with > 400 gallons per year
+joined_data_with_cost %>%
+  filter(local_market_partner == TRUE & co2_customer == FALSE) %>%
+  group_by(customer_number, order_type) %>%
+  summarize(total_gallons = sum(ordered_gallons + ordered_cases, na.rm = TRUE)) %>%
+  filter(total_gallons > 400) %>% 
+  group_by(order_type) %>% 
+  summarize(gallons = sum(total_gallons)) %>%
+  ggplot(aes(x = order_type, y = gallons, fill = order_type)) +
+  geom_bar(stat = "identity") +
+  ggtitle("Barplot of Ordered Gallons by Order Type (Customers > 400 Gallons)") +
+  labs(x = "Order Type", y = "Total Gallons") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal()
+```
+
+The EDI order type is significantly more popular amongst the local market partner group; however, call center and mymoke360/legacy remain the most popular choices amongst customers with a volume of less than 400 gallons.
+
+## Frequent Order Type
+```{r}
+# gallons by frequent order type and year for all customers
+joined_data_with_cost %>%
+  filter(local_market_partner == TRUE & co2_customer == FALSE) %>%
+  group_by(frequent_order_type, year) %>%
+  summarize(gallons = sum(ordered_gallons + ordered_cases))
+
+# customers by frequent order type and year for all customers
+joined_data_with_cost %>%
+  filter(local_market_partner == TRUE & co2_customer == FALSE) %>%
+  group_by(frequent_order_type, year) %>%
+  summarize(customer_count = n_distinct(customer_number))
+
+# for all customers
+joined_data_with_cost %>%
+  filter(local_market_partner == TRUE & co2_customer == FALSE) %>%
+  group_by(frequent_order_type) %>%
+  summarize(gallons = sum(ordered_gallons + ordered_cases)) %>%
+  ggplot(aes(x = frequent_order_type, y = gallons, fill = frequent_order_type)) +
+  geom_bar(stat="identity") +
+  ggtitle("Barplot of Ordered Gallons by Order Type") +
+  labs(x = "Order Type", y = "Total Gallons") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal()
+
+# for customers with < 400 gallons per year
+joined_data_with_cost %>%
+  filter(local_market_partner == TRUE & co2_customer == FALSE) %>%
+  group_by(customer_number, frequent_order_type) %>%
+  summarize(total_gallons = sum(ordered_gallons + ordered_cases, na.rm = TRUE)) %>%
+  filter(total_gallons < 400) %>% 
+  group_by(frequent_order_type) %>% 
+  summarize(gallons = sum(total_gallons)) %>%
+  ggplot(aes(x = frequent_order_type, y = gallons, fill = frequent_order_type)) +
+  geom_bar(stat = "identity") +
+  ggtitle("Ordered Gallons by Frequent Order Type (Customers < 400 Gallons)") +
+  labs(x = "Frequent Order Type", y = "Total Gallons") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal()
+
+# for customers with > 400 gallons per year
+joined_data_with_cost %>%
+  filter(local_market_partner == TRUE & co2_customer == FALSE) %>%
+  group_by(customer_number, frequent_order_type) %>%
+  summarize(total_gallons = sum(ordered_gallons + ordered_cases, na.rm = TRUE)) %>%
+  filter(total_gallons > 400) %>% 
+  group_by(frequent_order_type) %>% 
+  summarize(gallons = sum(total_gallons)) %>%
+  ggplot(aes(x = frequent_order_type, y = gallons, fill = frequent_order_type)) +
+  geom_bar(stat = "identity") +
+  ggtitle("Ordered Gallons by Frequent Order Type (Customers > 400 Gallons)") +
+  labs(x = "Frequent Order Type", y = "Total Gallons") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal()
+```
+
+## Cold Drink Channel
+```{r}
+# gallons by cold drink channel and year for all customers
+joined_data_with_cost %>%
+  filter(local_market_partner == TRUE & co2_customer == FALSE) %>%
+  group_by(cold_drink_channel, year) %>%
+  summarize(gallons = sum(ordered_gallons + ordered_cases))
+
+# customers by cold drink channel and year for all customers
+joined_data_with_cost %>%
+  filter(local_market_partner == TRUE & co2_customer == FALSE) %>%
+  group_by(cold_drink_channel, year) %>%
+  summarize(customer_count = n_distinct(customer_number))
+
+# for all customers
+joined_data_with_cost %>%
+  filter(local_market_partner == TRUE & co2_customer == FALSE) %>%
+  group_by(cold_drink_channel) %>%
+  summarize(gallons = sum(ordered_gallons + ordered_cases)) %>%
+  ggplot(aes(x = cold_drink_channel, y = gallons, fill = cold_drink_channel)) +
+  geom_bar(stat="identity") +
+  ggtitle("Barplot of Ordered Gallons by Order Type") +
+  labs(x = "Order Type", y = "Total Gallons") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal()
+
+# for customers with < 400 gallons per year
+joined_data_with_cost %>%
+  filter(local_market_partner == TRUE & co2_customer == FALSE) %>%
+  group_by(customer_number, cold_drink_channel) %>%
+  summarize(total_gallons = sum(ordered_gallons + ordered_cases, na.rm = TRUE)) %>%
+  filter(total_gallons < 400) %>% 
+  group_by(cold_drink_channel) %>% 
+  summarize(gallons = sum(total_gallons)) %>%
+  ggplot(aes(x = cold_drink_channel, y = gallons, fill = cold_drink_channel)) +
+  geom_bar(stat = "identity") +
+  ggtitle("Ordered Gallons by Cold Drink Channel (Customers < 400 Gallons)") +
+  labs(x = "Cold Drink Channel", y = "Total Gallons") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal()
+
+# for customers with > 400 gallons per year
+joined_data_with_cost %>%
+  filter(local_market_partner == TRUE & co2_customer == FALSE) %>%
+  group_by(customer_number, cold_drink_channel) %>%
+  summarize(total_gallons = sum(ordered_gallons + ordered_cases, na.rm = TRUE)) %>%
+  filter(total_gallons > 400) %>% 
+  group_by(cold_drink_channel) %>% 
+  summarize(gallons = sum(total_gallons)) %>%
+  ggplot(aes(x = cold_drink_channel, y = gallons, fill = cold_drink_channel)) +
+  geom_bar(stat = "identity") +
+  ggtitle("Ordered Gallons by Cold Drink Channel (Customers > 400 Gallons)") +
+  labs(x = "Cold Drink Channel", y = "Total Gallons") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal()
+```
+
+
+## Trade Channel
+```{r}
+# gallons by trade channel and year for all customers
+joined_data_with_cost %>%
+  filter(local_market_partner == TRUE & co2_customer == FALSE) %>%
+  group_by(trade_channel, year) %>%
+  summarize(gallons = sum(ordered_gallons + ordered_cases))
+
+# customers by trade channel and year for all customers
+joined_data_with_cost %>%
+  filter(local_market_partner == TRUE & co2_customer == FALSE) %>%
+  group_by(trade_channel, year) %>%
+  summarize(customer_count = n_distinct(customer_number))
+
+# for all customers
+joined_data_with_cost %>%
+  filter(local_market_partner == TRUE & co2_customer == FALSE) %>%
+  group_by(trade_channel) %>%
+  summarize(gallons = sum(ordered_gallons + ordered_cases)) %>%
+  ggplot(aes(x = trade_channel, y = gallons, fill = trade_channel)) +
+  geom_bar(stat="identity") +
+  ggtitle("Barplot of Ordered Gallons by Order Type") +
+  labs(x = "Order Type", y = "Total Gallons") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal()
+
+# for customers with < 400 gallons per year
+joined_data_with_cost %>%
+  filter(local_market_partner == TRUE & co2_customer == FALSE) %>%
+  group_by(customer_number, trade_channel) %>%
+  summarize(total_gallons = sum(ordered_gallons + ordered_cases, na.rm = TRUE)) %>%
+  filter(total_gallons < 400) %>% 
+  group_by(trade_channel) %>% 
+  summarize(gallons = sum(total_gallons)) %>%
+  ggplot(aes(x = trade_channel, y = gallons, fill = trade_channel)) +
+  geom_bar(stat = "identity") +
+  ggtitle("Ordered Gallons by Trade Channel (Customers < 400 Gallons)") +
+  labs(x = "Trade Channel", y = "Total Gallons") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal()
+
+# for customers with > 400 gallons per year
+joined_data_with_cost %>%
+  filter(local_market_partner == TRUE & co2_customer == FALSE) %>%
+  group_by(customer_number, trade_channel) %>%
+  summarize(total_gallons = sum(ordered_gallons + ordered_cases, na.rm = TRUE)) %>%
+  filter(total_gallons > 400) %>% 
+  group_by(trade_channel) %>% 
+  summarize(gallons = sum(total_gallons)) %>%
+  ggplot(aes(x = trade_channel, y = gallons, fill = trade_channel)) +
+  geom_bar(stat = "identity") +
+  ggtitle("Ordered Gallons by Trade Channel (Customers > 400 Gallons)") +
+  labs(x = "Trade Channel", y = "Total Gallons") +
   scale_y_continuous(labels = scales::comma) +
   theme_minimal()
 ```
