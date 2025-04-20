@@ -1,7 +1,6 @@
 ![Swire Project Banner](./misc/swire-banner.png)
 
-# Swire Delivery Standardization | University of Utah MSBA 
-### Georgia Christodoulou
+# Swire Delivery Standardization | Georgia Christodoulou
 
 Repository featuring individual work for data prep, analysis, modeling, and group proposals for segmenting the delivery business models of Swire Coca-Cola.
 
