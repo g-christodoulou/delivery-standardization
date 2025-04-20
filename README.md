@@ -2,7 +2,7 @@
 
 # Swire Delivery Standardization | University of Utah MSBA
 
-Repository featuring Georgia Christodoulou's individual work for data prep, analysis, modeling, and group proposals for segmenting the delivery business models of Swire Coca-Cola.
+This repository features my individual contributions to Swire Coca-Cola's delivery segmentation project as part of the University of Utah MSBA case competition. It includes personal code, analysis, modeling, and takeaways developed during the group project. This also features our group's solution to the business problem and the value of our solution. 
 
 ## Project Summary
 
