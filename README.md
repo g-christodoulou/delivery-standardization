@@ -55,3 +55,6 @@ I also gained valuable experience working with limited and delayed data, which r
 
 Finally, I learned the importance of time management. I was highly focused on building a strong model, but with more time, I could have better integrated those insights into our final presentation and recommendations. This project helped me grow both technically and professionally, especially in areas like working through ambiguity, prioritizing model interpretability, and balancing analysis with business communication.
 
+Thank you!
+Georgia Christodoulou
+
