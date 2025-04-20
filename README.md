@@ -41,11 +41,7 @@ Adam, Georgia, Tyler, Zac
 
 ## Challenges
 
-All analyses, insights, and recommendations were based on sanitized datasets and supporting documentation provided by Swire. One major challenge was the ambiguity of the project goals. Early on, there were competing priorities between identifying high-potential customers and reducing delivery costs.
-
-We also faced data limitations. Delivery cost data, which was critical for assessing efficiency, was provided very late in the project. Additionally, we only had access to two years of customer-level data, which limited our ability to explore longer-term patterns, such as tenure-based value or lifecycle growth.
-
-Another gap was the absence of revenue data, which made it difficult to directly assess the financial impact of our segmentation strategies. While we were able to measure volume retained across strategies, we could not quantify whether our recommendations improved revenue or profit margins. Translating volume gains into revenue impact would have strengthened our case.
+All analyses, insights, and recommendations were based on sanitized datasets and supporting documentation provided by Swire. One major challenge was the ambiguity of the project goals. Early on, there were competing priorities between identifying high-potential customers and reducing delivery costs. We also faced data limitations. Delivery cost data, which was critical for assessing efficiency, was provided very late in the project. Additionally, we only had access to two years of customer-level data, which limited our ability to explore longer-term patterns, such as tenure-based value or lifecycle growth. Another gap was the absence of revenue data, which made it difficult to directly assess the financial impact of our segmentation strategies. While we were able to measure volume retained across strategies, we could not quantify whether our recommendations improved revenue or profit margins. Translating volume gains into revenue impact would have strengthened our case.
 
 ## My Contribution
 
