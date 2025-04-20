@@ -1,0 +1,427 @@
+---
+title: "georgia-modeling-initial"
+author: "Georgia Christodoulou"
+date: "2025-03-15"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Data Preparation
+Since XGBoost requires numerical values, all categorical variables were turned into factors so they could be encoded later. Columns I thought were unnecessary were removed to simplify the dataset. To help the model recognize patterns, several new features were added. Date-based features like week, month, and quarter were created to help capture seasonal trends. Lag features (lag_1, lag_4, lag_6) were added to give the model information about recent orders, helping it detect short-term changes. Rolling averages (rolling_avg_3 and rolling_avg_6) were included to smooth out order patterns and reduce noise, and a growth_rate feature was added to measure customer momentum by comparing recent orders to past orders. To better predict behavior for different customer types, a new_customer flag was created to separate new customers from established ones to help the model handle each group’s unique behaviors.
+
+# Modeling Process
+Since older and new customers behave differently, separate models were built for each group. Since categorical data (like trade channels) was important, those features were converted into dummy variables so the model could use them effectively. Both models used XGBoost with the same hyperparameters. The hyperparameters were adjusted numerous times to improve performance, but due to time constraints, the following hyperparameters were chosen for the best performance:
+
+max_depth = 6 to control complexity
+min_child_weight = 5 to prevent overly small data splits
+subsample = 0.8 to improve generalization
+colsample_bytree = 0.7 to randomly sample features and reduce overfitting
+
+# Model Performance
+The model’s performance was evaluated using Root Mean Square Error (RMSE) and Mean Absolute Error (MAE). RMSE provides insight into the magnitude of prediction errors, while MAE reflects the average prediction error.
+
+For older customers, the model achieved an RMSE of 22.24 and an MAE of 4.78, demonstrating strong predictive accuracy with relatively low error values. This result suggests that the model effectively captured established customer behavior. For new customers, the model's performance was less optimal, with an RMSE of 38.59 and an MAE of 6.54. This higher error is expected given the limited transaction history available for these customers. The difference in performance highlights the difficulty in forecasting for new customers, where limited historical data introduces more volatility and noise.
+
+# Future Improvements
+While the current models perform well, several enhancements could further improve forecasting accuracy. Additionally, while this model is focused on forecasting future orders, more needs to be done to be able to identify "high-growth" customers. 
+
+Some general future model enhancements could include:
+- Exploring additional/separate hyperparameter tuning for each model (new and more established customers)
+- Exploring dynamic lag features for individual customer segments like trade channel, cold drink channel, etc. could improve forecast precision, specifically for volatile more customers
+
+Some future steps could include:
+- Adjusting the growth rate feature to track growth over different time periods, like 3, 6, and 12 weeks, to capture short-term jumps and steady growth. 
+- Adding new features such as how often orders are increasing, how quickly orders are happening, and changes in order size can highlight customers on a growth path.
+- Grouping customers by trade channel, order type, or how long they've been a customer can also make it easier to spot high-growth pattern
+
+# Reading the Data
+```{r}
+library(data.table)
+library(ggplot2)
+library(zoo)
+library(forecast)
+library(lubridate)
+library(randomForest)
+library(xgboost)
+library(Metrics)
+library(fastDummies)
+
+
+neighbors <- as.data.frame(data.table::fread("C:/Users/GeorgiaChristodoulou/Desktop/Final Capstone Project Spring 2025/delivery-standardization-group/data/customer_neighbor_fields.csv"))
+data <- as.data.frame(data.table::fread("C:/Users/GeorgiaChristodoulou/Desktop/Final Capstone Project Spring 2025/delivery-standardization-group/data/swire_data_full.csv"))
+
+cols <- names(data)[sapply(data, is.character)]
+data[cols] <- lapply(data[cols], as.factor)
+
+data <- subset(data, select = -primary_group_number)
+
+str(data)
+str(neighbors)
+```
+
+```{r}
+# convert character variables to factor
+cols <- names(data)[sapply(data, is.character)]
+data[cols] <- lapply(data[cols], as.factor)
+
+# remove primary group number
+data <- subset(data, select = -primary_group_number)
+
+# add a "week" and "month" column
+data$transaction_week <- floor_date(data$transaction_date, unit = "week")
+data$transaction_month <- floor_date(data$transaction_date, unit = "month")
+
+# convert to data table
+setDT(data)
+
+# join neighbors data
+data <- data[neighbors, on = "customer_number"]
+```
+
+# Visual
+```{r}
+df_grouped <- data[, .(ordered_total = sum(ordered_total)), 
+                  by = .(transaction_month, trade_channel)]
+
+ggplot(df_grouped, aes(x = transaction_month, y = ordered_total)) +
+  geom_line() +
+  facet_wrap(~ trade_channel, scales = "free_y", labeller = label_wrap_gen(width = 15)) +
+  labs(title = "Orders Over Time by Group",
+       x = "Date",
+       y = "Total Gallons Ordered") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 6, angle = 45, hjust = 1),
+    axis.text.y  = element_text(size = 6),
+    strip.text = element_text(size = 6)
+  )
+```
+
+# Forecasting Data Preparation
+```{r cars}
+# aggregate to weekly transactions by customer for all customers
+df_grouped_week <- data[, .(
+  weekly_ordered_total   = sum(ordered_total, na.rm=TRUE),
+  weekly_delivered_total = sum(delivered_total, na.rm=TRUE)#,
+  #weekly_return_freq     = sum(return_frequency, na.rm=TRUE)
+), by = .(transaction_week, customer_number)]
+
+# subset data
+features <- data[, .(customer_number, on_boarding_date, first_delivery_date, cold_drink_channel, frequent_order_type, trade_channel, sub_trade_channel, neighbor_avg_dist_km, neighbor_primary_group_count, neighbor_avg_return_freq, neighbor_local_market_partners, neighbor_avg_order_transactions_2023, neighbor_avg_order_transactions_2024, neighbor_avg_order_transaction_std_2023, neighbor_avg_order_transaction_std_2024, neighbor_avg_ordered_total_2023, neighbor_avg_ordered_total_2024)]
+
+# get unique features
+features <- unique(features)
+
+# create a full set of weeks for each customer - all customers
+date_seq_all <- df_grouped_week[, .(transaction_week = seq(min(transaction_week),
+                                                   max(transaction_week), 
+                                                   by = "week")), 
+                        by = customer_number]
+
+# merge back with original data
+df_grouped_week <- merge(date_seq_all, df_grouped_week, 
+                     by = c("customer_number", "transaction_week"), 
+                     all.x = TRUE)
+
+# fill missing weeks with zero orders
+df_grouped_week[is.na(weekly_ordered_total), weekly_ordered_total := 0]
+df_grouped_week[is.na(weekly_delivered_total), weekly_delivered_total := 0]
+#df_grouped_week[is.na(weekly_return_freq), weekly_return_freq := 0]
+
+# join the rest of the variables for all customers 
+df_grouped_week <- merge(df_grouped_week, features, by = "customer_number", all = TRUE)
+```
+
+## Feature Engineering
+```{r}
+# newer vs. existing customers using first delivery date
+# new vs. existing cutoff
+cutoff_date <- as.IDate("2023-07-01")
+
+# create a logical flag
+df_grouped_week[, new_customer := (first_delivery_date >= cutoff_date)]
+
+# add date-based features
+df_grouped_week[, month := month(transaction_week)]
+df_grouped_week[, quarter := quarter(transaction_week)]
+
+# sort to chronological order
+setorder(df_grouped_week, customer_number, transaction_week)
+
+# add Lag Features
+df_grouped_week[, lag_1 := shift(weekly_ordered_total, 1), by = customer_number]
+df_grouped_week[, lag_4 := shift(weekly_ordered_total, 4), by = customer_number]
+df_grouped_week[, lag_6 := shift(weekly_ordered_total, 6), by = customer_number]
+
+# add Rolling Averages
+df_grouped_week[, rolling_avg_3 := frollmean(weekly_ordered_total, 3), by = customer_number]
+df_grouped_week[, rolling_avg_6 := frollmean(weekly_ordered_total, 6), by = customer_number]
+
+# time since onboarding
+df_grouped_week[, time_since_onboarding_weeks := 
+  as.numeric(difftime(transaction_week, on_boarding_date, units = "weeks"))]
+df_grouped_week[time_since_onboarding_weeks < 0, time_since_onboarding_weeks := 0]
+
+# growth rate calculation
+df_grouped_week[, growth_rate := (weekly_ordered_total - shift(weekly_ordered_total, 4)) / 
+                                      shift(weekly_ordered_total, 4), by = customer_number]
+
+# replace infinite or NA values with zero
+df_grouped_week[is.infinite(growth_rate) | is.na(growth_rate), growth_rate := 0]
+```
+
+
+# Create train and test data
+```{r}
+# split data based on time
+train <- df_grouped_week[new_customer == FALSE & transaction_week < "2024-7-1"]
+test  <- df_grouped_week[new_customer == FALSE & transaction_week >= "2024-7-1"]
+
+y_train <- train$weekly_ordered_total
+y_test <- test$weekly_ordered_total
+
+train[, week_of_year := week(transaction_week)]
+train[, month := month(transaction_week)]
+train[, quarter := quarter(transaction_week)]
+train[, year := year(transaction_week)]
+
+test[, week_of_year := week(transaction_week)]
+test[, month := month(transaction_week)]
+test[, quarter := quarter(transaction_week)]
+test[, year := year(transaction_week)]
+
+exclude_cols <- c("customer_number", "weekly_ordered_total", "first_delivery_date", "transaction_week", "on_boarding_date", "weekly_delivered_total")
+test_id_table <- test[, .(customer_number, transaction_week, weekly_ordered_total)]
+cat_features <- names(train)[sapply(train, is.factor) | sapply(train, is.character)]
+
+# dummy encode categorical variables and remove target and identifier vars
+x_train <- train[, setdiff(names(train), exclude_cols), with = FALSE]
+x_train <- dummy_cols(x_train, select_columns = cat_features, remove_selected_columns = TRUE)
+
+# dummy encode test data and remove target and identifier vars
+x_test <- test[, setdiff(names(train), exclude_cols), with = FALSE]
+x_test <- dummy_cols(x_test, select_columns = cat_features, remove_selected_columns = TRUE)
+
+# convert to matrix
+x_train <- as.matrix(x_train)
+x_test <- as.matrix(x_test)
+
+# Convert Data to DMatrix Format
+dtrain <- xgb.DMatrix(data = x_train, label = y_train, missing = NA)
+dtest  <- xgb.DMatrix(data = x_test, label = y_test, missing = NA)
+```
+
+# Forecasting Older Customers
+```{r}
+params_reg <- list(
+  objective = "reg:squarederror",
+  eta = 0.1,
+  max_depth = 6,
+  min_child_weight = 5,
+  subsample = 0.8,
+  colsample_bytree = 0.7,
+  reg_alpha = 0.3,        # add L1 regularization
+  reg_lambda = 1,         # add L2 regularization
+  eval_metric = c("rmse", "mae")
+)
+
+model <- xgb.train(
+  params = params_reg,
+  data = dtrain,
+  nrounds = 500,
+  watchlist = list(train = dtrain, test = dtest),
+  early_stopping_rounds = 30
+)
+```
+
+# Create train and test data - New Customers
+```{r}
+# split data based on time
+train_new <- df_grouped_week[new_customer == TRUE & transaction_week < "2024-7-1"]
+test_new  <- df_grouped_week[new_customer == TRUE & transaction_week >= "2024-7-1"]
+
+y_train_new <- train_new$weekly_ordered_total
+y_test_new <- test_new$weekly_ordered_total
+
+train_new[, week_of_year := week(transaction_week)]
+train_new[, month := month(transaction_week)]
+train_new[, quarter := quarter(transaction_week)]
+train_new[, year := year(transaction_week)]
+
+test_new[, week_of_year := week(transaction_week)]
+test_new[, month := month(transaction_week)]
+test_new[, quarter := quarter(transaction_week)]
+test_new[, year := year(transaction_week)]
+
+exclude_cols <- c("customer_number", "weekly_ordered_total", "first_delivery_date", "transaction_week", "on_boarding_date", "weekly_delivered_total")
+test_id_table_new <- test_new[, .(customer_number, transaction_week, weekly_ordered_total)]
+cat_features <- names(train_new)[sapply(train_new, is.factor) | sapply(train_new, is.character)]
+
+# dummy encode categorical variables and remove target and identifier vars
+x_train_new <- train_new[, setdiff(names(train_new), exclude_cols), with = FALSE]
+x_train_new <- dummy_cols(x_train_new, select_columns = cat_features, remove_selected_columns = TRUE)
+
+# dummy encode test data and remove target and identifier vars
+test_new <- test_new[, setdiff(names(train_new), exclude_cols), with = FALSE]
+test_new <- dummy_cols(test_new, select_columns = cat_features, remove_selected_columns = TRUE)
+
+# convert to matrix
+x_train_new <- as.matrix(x_train_new)
+test_new <- as.matrix(test_new)
+
+# convert Data to DMatrix Format
+dtrain_new <- xgb.DMatrix(data = x_train_new, label = y_train_new, missing = NA)
+dtest_new  <- xgb.DMatrix(data = test_new, label = y_test_new, missing = NA)
+```
+
+# Forecasting New Customers
+```{r}
+params_new <- list(
+  objective = "reg:squarederror",
+  eta = 0.1,
+  max_depth = 6,
+  min_child_weight = 5,
+  subsample = 0.8,
+  colsample_bytree = 0.7,
+  reg_alpha = 0.3,        # add L1 regularization
+  reg_lambda = 1,         # add L2 regularization
+  eval_metric = c("rmse", "mae")
+)
+
+model_new <- xgb.train(
+  params = params_new,
+  data = dtrain_new,
+  nrounds = 500,
+  watchlist = list(train = dtrain_new, test = dtest_new),
+  early_stopping_rounds = 30
+)
+```
+
+# Predictions and Performance - Older Customers
+```{r}
+# predict
+predictions <- predict(model, dtest)
+
+test_id_table[, predicted_total := predictions]
+
+# calculate rmse and mae scores
+rmse_score <- rmse(y_test, predictions)
+mae_score <- mae(y_test, predictions)
+print(paste("RMSE:", rmse_score))
+print(paste("MAE:", mae_score))
+```
+
+
+# Predictions and Performance - New Customers
+```{r}
+# predict
+predictions_new <- predict(model_new, dtest_new)
+
+test_id_table_new[, predicted_total := predictions_new]
+
+# calculate rmse and mae scores
+rmse_score_new <- rmse(y_test_new, predictions_new)
+mae_score_new <- mae(y_test_new, predictions_new)
+print(paste("RMSE:", rmse_score_new))
+print(paste("MAE:", mae_score_new))
+```
+
+# Key variables 
+```{r}
+# older customers
+importance <- xgb.importance(feature_names = colnames(x_train), model = model)
+xgb.plot.importance(importance)
+setorder(importance, -Importance)
+importance
+
+# new customers
+importance_new <- xgb.importance(feature_names = colnames(x_train_new), model = model_new)
+xgb.plot.importance(importance_new)
+setorder(importance_new, -Importance)
+importance_new
+```
+
+# Future Forecasts
+```{r}
+# Forecast horizon (e.g., 12 weeks into the future)
+#forecast_horizon <- 12
+
+# Create future date sequence
+#future_dates <- df_grouped_week[, .(
+ #   transaction_week = seq(max(transaction_week) + 7, 
+  #                         max(transaction_week) + (forecast_horizon * 7), 
+   #                        by = "week")
+#), by = customer_number]
+
+# Use recent known values for lag features
+#future_dates <- merge(future_dates, 
+ #                     df_grouped_week[transaction_week == max(transaction_week), 
+  #                                    .(customer_number, 
+   #                                     lag_1 = weekly_ordered_total,
+    #                                    lag_4 = shift(weekly_ordered_total, 4),
+     #                                   lag_6 = shift(weekly_ordered_total, 6),
+      #                                  rolling_avg_3 = frollmean(weekly_ordered_total, 3),
+       #                                 rolling_avg_6 = frollmean(weekly_ordered_total, 6),
+        #                                growth_rate = (weekly_ordered_total - shift(weekly_ordered_total, 4)) /
+         #                                             shift(weekly_ordered_total, 4)
+          #                            )], 
+           #           by = "customer_number", all.x = TRUE)
+
+#future_dates <- merge(future_dates, features, by = "customer_number", all.x = TRUE)
+
+#future_dates[, new_customer := (first_delivery_date >= cutoff_date)]
+
+# time since onboarding
+#future_dates[, time_since_onboarding_weeks := 
+ # as.numeric(difftime(transaction_week, on_boarding_date, units = "weeks"))]
+#future_dates[time_since_onboarding_weeks < 0, time_since_onboarding_weeks := 0]
+
+# Fill any NAs with zero for lag values
+#future_dates[is.na(lag_1), lag_1 := 0]
+#future_dates[is.na(lag_4), lag_4 := 0]
+#future_dates[is.na(lag_6), lag_6 := 0]
+#future_dates[is.na(rolling_avg_3), rolling_avg_3 := 0]
+#future_dates[is.na(rolling_avg_6), rolling_avg_6 := 0]
+#future_dates[is.na(growth_rate), growth_rate := 0]
+
+# Add date-based features
+#future_dates[, week_of_year := week(transaction_week)]
+#future_dates[, month := month(transaction_week)]
+#future_dates[, quarter := quarter(transaction_week)]
+#future_dates[, year := year(transaction_week)]
+
+# Dummy encode categorical variables
+#x_future <- future_dates[, setdiff(names(train), exclude_cols), with = FALSE]
+#future_dates <- dummy_cols(future_dates, select_columns = cat_features, remove_selected_columns = TRUE)
+
+# Convert to matrix format for XGBoost
+#x_future <- as.matrix(future_dates)
+#dfuture <- xgb.DMatrix(data = x_future, missing = NA)
+
+# Predict future values
+#future_predictions <- predict(model, dfuture)
+
+# Add predictions back to future data
+#future_dates[, predicted_total := future_predictions]
+
+# Combine actual and forecast data
+#forecast_plot <- rbind(
+ # df_grouped_week[, .(customer_number, transaction_week, weekly_ordered_total)],
+  #future_dates[, .(customer_number, transaction_week, predicted_total)]
+#)
+
+# Plot actual vs forecast
+#ggplot(forecast_plot, aes(x = transaction_week)) +
+ # geom_line(aes(y = weekly_ordered_total, color = "Actual")) +
+  #geom_line(aes(y = predicted_total, color = "Forecast")) +
+  #labs(title = "Forecast of Weekly Ordered Totals",
+   #    x = "Date", y = "Weekly Ordered Total") +
+#  facet_wrap(~ customer_number, scales = "free_y") +
+ # theme_minimal()
+```
+
+
+
